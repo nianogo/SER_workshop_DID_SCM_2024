@@ -1,0 +1,330 @@
+---
+title: "An overview of Difference-in-Difference and Synthetic Control Methods: Classical and Novel Approaches"
+description: |
+  Society for Epidemiologic Research (SER) Workshop:   |  
+  Setup: Part 1/4
+author:
+  - name: Tarik Benmarhnia
+    url: https://profiles.ucsd.edu/tarik.benmarhnia
+    affiliation: UCSD & Scripps Institute
+    affiliation_url: https://benmarhniaresearch.ucsd.edu/
+  - name: Roch Nianogo
+    url: https://ph.ucla.edu/about/faculty-staff-directory/roch-nianogo
+    affiliation: Department of Epidemiology, UCLA Fielding School of Public Health
+    affiliation_url: https://ph.ucla.edu/about/faculty-staff-directory/roch-nianogo
+date: "April 22th 2024"
+output:
+    distill::distill_article:
+      toc: true
+      toc_depth: 3
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r, include=FALSE}
+# code chunk option
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  dpi = 400
+)
+```
+
+
+
+
+
+
+In this document, we will provide all steps and R codes required to implement 
+the methods outlined in the slides. This will include the following methods
+
+- Interrupted Time Series (ITS) 
+- Difference-in-difference (DID) and related methods 
+- Synthetic control methods and related methods   
+
+There will be four html files  
+- The setup (this file) (1/4)   
+- Difference-in-difference (DID) and related methods (2/4)   
+- Synthetic control methods and related methods (3/4)  
+- Heterogeneous treatment and staggered adoption (4/4)  
+
+
+
+
+
+**Should you have any questions, need help to reproduce the analysis or find coding errors, please do not hesitate to contact us at niaroch@ucla.edu or tbenmarhnia@ucsd.edu**.
+
+
+
+# Loading packages  
+
+To reproduce the html documents, you will need to install the following 
+
+* the [R](https://www.r-project.org/) programming language 
+* [RStudio](https://rstudio.com/), an integrated development environment for R,
+* the [R Markdown](https://rmarkdown.rstudio.com/) package
+* and the [Distill](https://rstudio.github.io/distill/) package which provides 
+the template for this document.
+
+Once everything is set up, we load the following packages:
+
+```{r}
+
+if (!require("pacman")){
+  install.packages("pacman", repos = 'http://cran.us.r-project.org')
+} # a nice package to load several packages simultaneously
+
+
+p_load("tidyverse","magrittr","broom",        #for manipulating data
+       "cleaR",                               #for clearing workspace
+       "here",                                #for directory managment
+       "Synth",                               #for the traditional synthetic control method
+       "gsynth",                              #for the generalized synthetic control method
+       "panelView",                           #for presenting data in a panel
+       "lme4",                                #for multi-level analysis
+       "estimatr",                            #for robust linear model
+       "did",                                 #for staggered difference-in-difference
+       "gtsummary")                           #for nice tables
+```
+
+# Loading the data  
+
+This is a simulated data where a policy (e.g. smoking ban) was implemented   
+- The policy was enacted in five states at the same time: Alabama,  Alaska, Arizona, Arkansas and California   
+- The policy was enacted in **2000**  
+- The unit of analysis is the **state**  
+- `y`  is the outcome  
+- `xi` is a time-invariant variable (but varies across states)  
+- `xt` is a time-varying variable (but is constant across states)  
+- `xit` is a time-varying and unit-variable (i.e. varies by year and state)    
+
+Let's load the data           
+
+```{r load_data}
+mydata <- read_csv(here("data", "sim_data.csv"))
+```
+
+Create some useful variables within the datasets:  
+- an indicator for after the policy has been implemented: called this `post`  
+- an indicator for states that have implemented the policy: called this `treated`  
+- an interaction term between post and treated: called this `treatedpost`  
+- create a recentered year variable such that `year_rec = 0` at the time of the policy  
+
+
+
+```{r edit_data}
+year_policy <- 2000
+
+mydata <- mydata %>% 
+  mutate(year_rec = year - year_policy,
+         post     = ifelse(year>=year_policy,1,0),
+         treated  = ifelse(state %in% c("Alabama",  "Alaska", 
+                                        "Arizona", "Arkansas", "California"), 1,0),
+         treatedpost = treated*post)
+```
+# Exploring the data structure  
+
+
+```{r exploring_data, layout="l-body-outset"}
+library(rmarkdown)
+paged_table(head(mydata, 10))
+
+glimpse(mydata)
+
+p_load("skimr")
+skim(mydata)
+```
+
+
+# Visualizing the data and policy  
+
+## Treatment overview  
+```{r visualizing}
+mydata <- mydata %>% 
+  mutate(year_rec = as.integer(year_rec)) %>%
+  as.data.frame() # need to convert to a data.frame for some functions to work
+```
+
+Using PanelView    
+
+```{r}
+p_load("panelView")
+panelview(y ~ treatedpost, data = mydata,
+          index = c("state","year_rec"), 
+          pre.post = TRUE) 
+```
+
+Using Panel Match   
+
+```{r}
+p_load("PanelMatch")
+DisplayTreatment(unit.id = "state_num",
+                 time.id = "year_rec", legend.position = "none",
+                 xlab = "year", ylab = "state",
+                 treatment = "treatedpost", data = mydata)
+```
+
+
+
+## Sample tables and Covariate balance plots      
+### Table 1    
+```{r tables0}
+p_load("gtsummary")
+n_treated0 <- mydata %>% 
+  filter(treated == 0) %>% 
+  select(state) %>% 
+  n_distinct()
+
+n_treated1 <- mydata %>% 
+  filter(treated == 1) %>% 
+  select(state) %>% 
+  n_distinct()
+
+tab1 <- mydata %>%
+  filter(post==0) %>% 
+  select(c("xit","xt", "xi", "treated","y")) %>% 
+  mutate(treated= case_when(treated==1~"Treated",
+                            TRUE~"Control")) %>% 
+  tbl_summary(
+    missing = "no",
+    by ="treated",
+    type = list(everything() ~ "continuous"),
+    digits = list(everything() ~ 2),
+    statistic = list(everything()~"{mean}")
+  ) %>% 
+  modify_spanning_header(c("stat_1", "stat_2") ~ "Table 1") %>% 
+  modify_header(update = list(
+    label ~ '**Characteristic**',
+    stat_1 ~ '**Control**, N = {n_treated0}',
+    stat_2 ~ '**Treated**, N = {n_treated1}'
+  )) 
+tab1
+```
+
+### Covariate balance plots  
+Balance by treated group    
+
+```{r}
+p1 <- mydata %>%
+  filter(post==0) %>% 
+  select(xt, xi, xit, y, treated) %>% 
+  mutate(treated= case_when(treated==1~"Treated",
+                            TRUE~"Control")) %>% 
+  group_by(treated) %>% 
+  group_modify(~ {.x %>% map_dfr(mean)}) %>% 
+  pivot_longer(cols = -treated,
+               names_to = c("variable"),
+               values_to = "mean") %>% 
+  ggplot(aes(x=treated, y=mean, fill=factor(treated))) +
+  geom_bar(stat="identity", position=position_dodge())+
+  geom_text(aes(label = round(mean,2)), 
+            position = position_stack(0.5), 
+            size=3, 
+            color = "black")+
+  facet_wrap(~variable, scales = "free_y") +
+  labs(title = "Checking for imbalance in variables pre-policy",
+       y = "Mean",
+       x = "Variables",
+       fill = "Treatment status")+
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+p1
+```
+Notice xt is constant across units   
+
+
+Balance by post period   
+
+```{r}
+p2 <- mydata %>%
+  filter(treated==0) %>% 
+  select(xt, xi, xit, y, post) %>% 
+  mutate(post= case_when(post==1~"After",
+                         TRUE~"Before")) %>% 
+  group_by(post) %>% 
+  group_modify(~ {.x %>% map_dfr(mean)}) %>% 
+  pivot_longer(cols = -post,
+               names_to = c("variable"),
+               values_to = "mean") %>% 
+  ggplot(aes(x=post, y=mean, fill=factor(post))) +
+  geom_bar(stat="identity", position=position_dodge())+
+  geom_text(aes(label = round(mean,2)), 
+            position = position_stack(0.5), 
+            size=3, 
+            color = "black")+
+  facet_wrap(~variable, scales = "free_y") +
+  labs(title = "Checking for imbalance in variables in control units",
+       y = "Mean",
+       x = "Variables",
+       fill = "Time")+
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+p2
+```
+Notice xi is constant across time  
+
+
+## Time trend plots  
+For all the data   
+
+```{r tables}
+mydata %>% 
+  ggplot(aes(x=year, y=y, group=state)) + 
+  annotate("rect", fill = "gray", alpha = 0.5,
+           xmin = 2000, xmax = 2010,
+           ymin = -Inf, ymax = Inf) +
+  labs(title = paste("Outcome by year"),
+       x = "Year", 
+       y = "Outcome",
+       color = "Treatment") +
+  geom_line(aes(color=factor(treated)), size=0.5) +
+  scale_color_discrete(labels=c("Control", "Treated")) +
+  geom_vline(xintercept = year_policy, lty=2) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+For two states   
+
+```{r}
+mydata %>% 
+  filter(state %in% c("California", "Georgia")) %>% 
+  ggplot(aes(x=year, y=y, group=state)) + 
+  annotate("rect", fill = "gray", alpha = 0.5,
+           xmin = 2000, xmax = 2010,
+           ymin = -Inf, ymax = Inf) +
+  labs(title = paste("Outcome by year"),
+       x = "Year", 
+       y = "Outcome",
+       color = "Treatment") +
+  geom_line(aes(color=factor(treated)), size=0.5) +
+  scale_color_discrete(labels=c("Control", "Treated")) +
+  geom_vline(xintercept = year_policy, lty=2) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+On average   
+
+```{r}
+mydata %>% 
+  group_by(year, treated) %>% 
+  summarise(y=mean(y),.groups="keep") %>% 
+  ggplot(aes(x=year, y=y, group=treated, color = factor(treated))) + 
+  annotate("rect", fill = "gray", alpha = 0.5,
+           xmin = 2000, xmax = 2010,
+           ymin = -Inf, ymax = Inf) +
+  labs(title = paste("Outcome by year"),
+       x = "Year", 
+       y = "Outcome",
+       colour = "Treatment") +
+  geom_line() +
+  scale_color_discrete(labels=c("Controls", "Treated")) +
+  geom_vline(xintercept = year_policy, lty=2) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+
